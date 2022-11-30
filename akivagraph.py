@@ -2,9 +2,12 @@
 Defines the classes needed for the spirograph
 """
 import math
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from datetime import datetime
 from boring_math import dist
+
+mpl.rcParams['agg.path.chunksize'] = 100000
 
 
 class Rotor:
@@ -26,19 +29,21 @@ class Rotor:
         self.y = y
         self.radius = radius
         self.theta = theta
-        self.theta_start = theta
+        self.init_theta = theta
         self.omega = omega
         self.arm_length = arm_length
 
     def __str__(self) -> str:
         return f"Rotor `{self.name}` | Loc: ({self.x}, {self.y}) | r: {self.radius} " \
-               f"| arm length: {self.arm_length} | theta: {self.theta}° | omega: {self.omega}°/sec"
+               f"| arm length: {self.arm_length} | theta: {self.theta}° | theta start: {self.init_theta}° " \
+               f"| omega: {self.omega}°/sec"
 
     def __eq__(self, other):
         # The use of the inequality on theta is to avoid floating point errors throwing off the comparison
         return other.name == self.name and other.x == self.x and other.y == self.y and other.radius == self.radius \
                 and other.arm_length == self.arm_length and other.omega == self.omega \
-                and abs(other.theta - self.theta) < CONFIG["fl_precision"]
+                and (abs(other.theta - self.theta) < CONFIG["fl_precision"]
+                     or abs(other.theta - self.theta) > 360 - CONFIG["fl_precision"])
 
     def copy(self):
         """
@@ -59,7 +64,7 @@ class Rotor:
         :param time: The time in question
         :return: The theta of the rotor at the specified time
         """
-        return (self.theta_start + (self.omega * time)) % 360
+        return (self.init_theta + (self.omega * time)) % 360
 
     def anchor_loc(self, time=None):
         """
@@ -106,7 +111,7 @@ class PlotResult:
         print("Generating points...")
 
         # Generate points
-        for _ in range(CONFIG["num_points"]):
+        for _ in range(CONFIG["max_steps"]):
             # Step both rotors forwards
             rotor_a.increment(CONFIG["time_step"])
             rotor_b.increment(CONFIG["time_step"])
@@ -146,19 +151,25 @@ class PlotResult:
                     self.x_min = min(self.x_min, min(x_list))
                     self.y_max = max(self.y_max, max(y_list))
                     self.y_min = min(self.y_min, min(y_list))
-            else:
-                # Update max and min
-                self.x_max = max(self.x_max, x)
-                self.x_min = min(self.x_min, x)
-                self.y_max = max(self.y_max, y)
-                self.y_min = min(self.y_min, y)
+
+            # Update max and min
+            self.x_max = max(self.x_max, x)
+            self.x_min = min(self.x_min, x)
+            self.y_max = max(self.y_max, y)
+            self.y_min = min(self.y_min, y)
 
             # Add points to list
             self.x.append(x)
             self.y.append(y)
 
             # Abort if both rotors and the world have returned to their initial states
-            if CONFIG["abort_on_cycle"] and rotor_a == rotor_a_init and rotor_b == rotor_b_init and world == world_init:
+            if CONFIG["DEBUG_LEVEL"] > 2:
+                print("==========================")
+                print(f"Time: {time}")
+                print(f"Rotor A: {rotor_a}")
+                print(f"Rotor B: {rotor_b}")
+                print(f"World: {world}")
+            if rotor_a == rotor_a_init and rotor_b == rotor_b_init and world == world_init:
                 self.aborted = True
                 break
 
@@ -353,12 +364,13 @@ def main(radius_a: float,
     if CONFIG["DEBUG_LEVEL"] > 0:
         print(rotor_a)
         print(rotor_b)
+        print(world)
 
     # Generate points
     start = datetime.now()
     result = PlotResult(rotor_a, rotor_b, world)
     points = datetime.now()
-    if CONFIG["PRINT_POINTS"]:
+    if CONFIG["print_points"]:
         for x, y in result.get_tuples():
             print(f"{x}\t{y}")
     print(f"ABORTED EARLY AT {len(result.x)} POINTS" if result.aborted
@@ -375,23 +387,24 @@ def main(radius_a: float,
                (y_center + max_axis_width / 2) + max_axis_width * CONFIG["padding"])
 
     # Graph points
-    plt.figure(dpi=1000, figsize=(10, 10))
-    # fig = plt.figure(figsize=(200,200))
-    ax = plt.subplot(111, aspect='equal')
-    plt.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)
-    ax.plot(result.x, result.y, linewidth=CONFIG["line_width"], color=CONFIG["color"])
+    plt.figure(dpi=1000, figsize=(10, 10))  # Set plot dimensions
+    ax = plt.subplot(111, aspect='equal')   # Create plot
+    plt.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)   # Center plot
+    ax.plot(result.x, result.y, linewidth=CONFIG["line_width"], color=CONFIG["color"])  # Plot data
+    ax.set(xlim=x_range, ylim=y_range)  # Set the range of the graph axes
+    plt.axis("off")     # Hide graph axes
+    if CONFIG["show_params"]:   # Show rotor parameters
+        # The `max_axis_width * 0.01` provides a consistent offset from the image edge
+        plt.text(x_range[0] + max_axis_width * CONFIG["param_padding"],
+                 y_range[0] + max_axis_width * CONFIG["param_padding"],
+                 f"Rotor A: (r: {rotor_a.radius}, θ: {rotor_a.init_theta}°, ω: {rotor_a.omega}°/s, "
+                 f"len: {rotor_a.arm_length})  |  Rotor B: (r: {rotor_b.radius}, θ: {rotor_b.init_theta}°, "
+                 f"ω: {rotor_b.omega}°/s, len: {rotor_b.arm_length})  |  "
+                 f"Rotor Sep: {rotor_b.x}  |  World: (x: {world.x}, y: {world.y}, ω: {world.omega}°/s)",
+                 fontsize="small")
+    plt.savefig(CONFIG["output_file"])  # Save to output file
 
-    # This is the code to do gradient lines. Warning: it's slow as shit
-    # ==================================================================
-    # cm = plt.get_cmap("twilight_shifted")
-    # cycle = [cm(i / (len(result) - 1)) for i in range(len(result) - 1)]
-    # ax.set_prop_cycle(color=cycle)
-    # for i in range(len(result)):
-    #     ax.plot(result.x[i:i+2], result.y[i:i+2], linewidth=CONFIG["line_width"])
-
-    ax.set(xlim=x_range, ylim=y_range)
-    plt.axis("off")
-    plt.savefig(CONFIG["output_file"])
+    # Print plot info to console
     plotted = datetime.now()
     print(f"PLOT RENDERED IN {(plotted - points).total_seconds()} SECONDS "
           f"(TOTAL: {(plotted - start).total_seconds()} SECONDS)")
@@ -402,23 +415,44 @@ def main(radius_a: float,
 
 
 CONFIG = {
-    "DEBUG_LEVEL": 2,   # 0 - Nothing
-                        # 1 - Allows things that print only once
-                        # 2 - Allows things that only conditionally print every loop
-                        # 3 - Everything
-    "PRINT_POINTS": False,
+    # Sets the amount of debug messages that are printed to console
+    # 0 - Nothing
+    # 1 - Allows things that print only once
+    # 2 - Allows things that only conditionally print every loop
+    # 3 - Everything
+    "DEBUG_LEVEL": 1,
+    # Print all of the points to console. Only do this for small graphs
+    "print_points": False,
+    # The threshold for floating point equality comparisons
+    # DO NOT CHANGE
+    "fl_precision": 0.00000001,
 
-    "time_step": 0.1 / 4,
-    "abort_on_cycle": True,
-    "smoothing": True,  # Interpolates points if the pen moved a lot between them.
-                         # Slows renders, but produces better results on large time steps
-    "max_point_sep": 1,    # The distance above which adjacent points will be smoothed
-    "num_points": 6000000,
+    # The amount of time between point calculations
+    # A smaller time step means longer renders but smoother lines
+    "time_step": 0.1,
+    # Renders additional points between two steps if the pen moved a lot
+    # On some graphs, this can dramatically increase render times
+    # However, on graphs with only a few jagged curves, this can increase smoothness without lowering the time step
+    "smoothing": False,
+    # If smoothing is turned on, this is the distance threshold above which points will be interpolated
+    # Recommended values are between 1 and 0.1
+    "max_point_sep": 1,
+    # The maximum number of steps to take before aborting
+    # If smoothing is turned on, the number of points generated will be higher
+    "max_steps": 1000000,
+
+    # Whitespace to put around the graph
     "padding": 0.1,
+    # The thickness of the line
     "line_width": 0.2,
+    # The file to output to. Should be a pdf or png file
     "output_file": "graph.pdf",
+    # The color of the line
     "color": "black",
-    "fl_precision": 0.000000001,
+    # Whether to print the rotor parameters at the bottom of the graph
+    "show_params": True,
+    # Padding for the parameter text
+    "param_padding": 0.01,
 }
 
 
@@ -429,19 +463,30 @@ if __name__ == '__main__':
               "\n-----------------------------------------------------")
         exit(-1)
 
+    if CONFIG["smoothing"] and CONFIG["max_point_sep"] <= 0:
+        print("-----------------------------------------------------\n"
+              "ERROR: max_point_sep must be greater than 0"
+              "\n-----------------------------------------------------")
+        exit(-1)
+
+    if CONFIG["smoothing"] and CONFIG["max_point_sep"] < 0.05:
+        print("-----------------------------------------------------\n"
+              "WARNING: max_point_sep is very low. This may cause long render times or even crashes"
+              "\n-----------------------------------------------------")
+
     # Rotor params
     p = {
         "radius_a": 10,
-        "theta_a": 90,
+        "theta_a": 0,
         "omega_a": -10.1,
-        "length_a": 15,
+        "length_a": 20,
 
         "radius_b": 10,
         "theta_b": 0,
-        "omega_b": 10,
-        "length_b": 15,
+        "omega_b": 101,
+        "length_b": 20,
 
-        "rotor_sep": 8,
+        "rotor_sep": 10,
 
         "world_x_coord": 5,
         "world_y_coord": 30,
