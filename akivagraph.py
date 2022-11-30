@@ -53,6 +53,14 @@ class Rotor:
         """
         self.theta = (self.theta + self.omega * time_step) % 360
 
+    def theta_at(self, time):
+        """
+        Computes the theta of this rotor at a specified time
+        :param time: The time in question
+        :return: The theta of the rotor at the specified time
+        """
+        return (self.theta_start + (self.omega * time)) % 360
+
     def anchor_loc(self, time=None):
         """
         Returns the coordinates of the point where the linkage is attached on the perimeter of the disk
@@ -60,7 +68,7 @@ class Rotor:
         would be at that moment (Default: None)
         :return: A tuple of two floats representing the (x,y) coordinates
         """
-        theta_rads = math.radians(self.theta if time is None else (self.theta_start + (self.omega * time)) % 360)
+        theta_rads = math.radians(self.theta if time is None else self.theta_at(time))
         return (math.cos(theta_rads) * self.radius + self.x), (math.sin(theta_rads) * self.radius + self.y)
 
 
@@ -84,7 +92,7 @@ class PlotResult:
         # Store initial point before going into loop
         x, y = compute_draw_loc(rotor_a.anchor_loc(), rotor_a.arm_length,
                                 rotor_b.anchor_loc(), rotor_b.arm_length,
-                                world)
+                                (world.x, world.y), world.theta)
         self.x = [x]
         self.y = [y]
 
@@ -118,19 +126,36 @@ class PlotResult:
             else:
                 x, y = compute_draw_loc(rotor_a.anchor_loc(), rotor_a.arm_length,
                                         rotor_b.anchor_loc(), rotor_b.arm_length,
-                                        world)
+                                        (world.x, world.y), world.theta)
 
             if CONFIG["smoothing"]:
-                pass
-            else:
-                self.x.append(x)
-                self.y.append(y)
+                # Interpolate
+                midpoints = interpolate(time, CONFIG["time_step"], (prev_x, prev_y), (x, y), rotor_a, rotor_b, world)
+                x_list = [point[0] for point in midpoints]
+                y_list = [point[1] for point in midpoints]
 
+                # Update prev points
+                prev_x, prev_y = x, y
+
+                if len(x_list) > 0:
+                    # Add interpolated points to list
+                    self.x += x_list
+                    self.y += y_list
+                    # Update max and min
+                    self.x_max = max(self.x_max, max(x_list))
+                    self.x_min = min(self.x_min, min(x_list))
+                    self.y_max = max(self.y_max, max(y_list))
+                    self.y_min = min(self.y_min, min(y_list))
+            else:
                 # Update max and min
                 self.x_max = max(self.x_max, x)
                 self.x_min = min(self.x_min, x)
                 self.y_max = max(self.y_max, y)
                 self.y_min = min(self.y_min, y)
+
+            # Add points to list
+            self.x.append(x)
+            self.y.append(y)
 
             # Abort if both rotors and the world have returned to their initial states
             if CONFIG["abort_on_cycle"] and rotor_a == rotor_a_init and rotor_b == rotor_b_init and world == world_init:
@@ -152,18 +177,19 @@ class PlotResult:
 
 def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
                      anchor_b: (float, float), arm_length_b: float,
-                     world: Rotor):
+                     world_loc: (float, float), world_theta: float):
     """
     Computes the coordinate of the drawing point where the two rotor linkages connect
     :param anchor_a: The (x,y) coordinates of rotor a's anchor point
     :param arm_length_a: The length of rotor a's arm
     :param anchor_b: The (x,y) coordinates of rotor b's anchor point
     :param arm_length_b: The length of rotor b's arm
-    :param world: The world which rotates under the other rotors
+    :param world_loc: The center point of the rotating world
+    :param world_theta: The current rotation of the world
     :return: The coordinates of the meeting point
     """
 
-    if CONFIG["DEBUG"]:
+    if CONFIG["DEBUG_LEVEL"] > 2:
         print("==============================================")
         print(f"Anchor A: {anchor_a}")
         print(f"Anchor B: {anchor_b}")
@@ -171,7 +197,7 @@ def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
     # The translation that all points must be offset by to put anchor a at (0,0)
     trans_offset = (anchor_a[0] * -1, anchor_a[1] * -1)
 
-    if CONFIG["DEBUG"]:
+    if CONFIG["DEBUG_LEVEL"] > 2:
         print(f"T_offset: {trans_offset}")
 
     # Compute the rotational offset to put anchor b on the x-axis
@@ -197,8 +223,10 @@ def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
               "\n-------------------------------------------------------------------------")
         exit(-1)
 
-    if CONFIG["DEBUG"]:
+    if CONFIG["DEBUG_LEVEL"] > 2:
         print(f"R_offset: {rot_offset}")
+        print(f"Translated Anchor B: {trans_anchor_b}")
+        print(f"Rotated Anchor B: {mapped_anchor_b}")
 
     # Offset formula always gives a positive result. If anchor b was above the x-axis, make offset negative
     if trans_anchor_b[1] > 0:
@@ -211,9 +239,13 @@ def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
 
     Cx = (AB**2 + AC**2 - BC**2)/(2 * AB)
     cy_component = AC**2 - Cx**2
+
+    if CONFIG["DEBUG_LEVEL"] > 2:
+        print(f"cy_component: {cy_component}")
+
     Cy = math.sqrt(abs(cy_component)) * (-1 if cy_component < 0 else 1)
 
-    if CONFIG["DEBUG"]:
+    if CONFIG["DEBUG_LEVEL"] > 2:
         print(f"Rotor draw point: ({Cx}, {Cy})")
 
     # Undo coordinate transformations
@@ -223,31 +255,20 @@ def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
     Cx_trans -= trans_offset[0]
     Cy_trans -= trans_offset[1]
 
-    if CONFIG["DEBUG"]:
+    if CONFIG["DEBUG_LEVEL"] > 2:
         print(f"Translated draw point: ({Cx_trans}, {Cy_trans})")
 
     # Do the hokey-pokey and turn that point around
-    world_rad = math.radians(world.theta)
-    Cx_world = (Cx_trans - world.x) * math.cos(world_rad) - (Cy_trans - world.y) * math.sin(world_rad)
-    Cy_world = (Cx_trans - world.x) * math.sin(world_rad) + (Cy_trans - world.y) * math.cos(world_rad)
+    world_rad = math.radians(world_theta)
+    Cx_world = (Cx_trans - world_loc[0]) * math.cos(world_rad) - (Cy_trans - world_loc[1]) * math.sin(world_rad)
+    Cy_world = (Cx_trans - world_loc[0]) * math.sin(world_rad) + (Cy_trans - world_loc[1]) * math.cos(world_rad)
 
-    Cx_world += world.x
-    Cy_world += world.y
+    Cx_world += world_loc[0]
+    Cy_world += world_loc[1]
 
-    if CONFIG["DEBUG"]:
-        print(f"World draw point: ({Cx_world}, {Cy_world})")
-
-    if CONFIG["VERBOSE"] and not CONFIG["DEBUG"] and abs(Cy_world) > 100:
+    if CONFIG["DEBUG_LEVEL"] > 2:
         print("==============================================")
-        print(f"Anchor A: {anchor_a}")
-        print(f"Anchor B: {anchor_b}")
-        print(f"Translated Anchor B: {trans_anchor_b}")
-        print(f"Rotated Anchor B: {mapped_anchor_b}")
-        print(f"T_offset: {trans_offset}")
-        print(f"R_offset: {rot_offset}")
         print(f"cy_component: {cy_component}")
-        print(f"Rotor draw point: ({Cx}, {Cy})")
-        print(f"Translated draw point: ({Cx_trans}, {Cy_trans})")
         print(f"World draw point: ({Cx_world}, {Cy_world})")
 
     return Cx_world, Cy_world
@@ -255,28 +276,43 @@ def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
 
 def interpolate(time: float, time_step: float,
                 prev_point: (float, float), curr_point: (float, float),
-                rotor_a: Rotor, rotor_b: Rotor) -> [(float, float)]:
+                rotor_a: Rotor, rotor_b: Rotor, world: Rotor) -> [(float, float)]:
     """
     Recursively generates more and more precise midpoints between two points until
     each one is separated from the next by less than the maximum allowable distance
-    :param time: The current time
+    :param time: The time at the current point
     :param time_step: The current time step (when called from another function, this is CONFIG["time_step"])
     :param prev_point: The coordinates of the previous point
     :param curr_point: The coordinates of the current point
     :param rotor_a: Rotor A
     :param rotor_b: Rotor B
+    :param world: The world
     :return: A list of interstitial points. If points are suitably close, the list will be empty
     """
-    point_list = []
     # Base condition
-    if dist(prev_point, curr_point) < CONFIG["max_point_sep"]:
-        return point_list
+    spread = dist(prev_point, curr_point)
+    if spread < CONFIG["max_point_sep"]:
+        return []
+
+    if CONFIG["DEBUG_LEVEL"] > 1:
+        print(f"INTERPOLATE - {time} | {time_step} | {prev_point} | {curr_point} | {spread}")
 
     # Compute mid time
     mid_time = time - (time_step / 2)
     mid_anchor_a = rotor_a.anchor_loc(mid_time)
     mid_anchor_b = rotor_b.anchor_loc(mid_time)
-    x, y = compute_draw_loc(mid_anchor_a, rotor_a.arm_length, mid_anchor_b, rotor_b.arm_length, world)
+    world_loc = (world.x, world.y)
+    # Compute the mid point
+    midpoint = compute_draw_loc(mid_anchor_a, rotor_a.arm_length,
+                                mid_anchor_b, rotor_b.arm_length,
+                                world_loc, world.theta_at(mid_time))
+    # Recursively compute the other midpoints
+    prev_midpoints = interpolate(mid_time, time_step / 2, prev_point, midpoint, rotor_a, rotor_b, world)
+    next_midpoints = interpolate(time, time_step / 2, midpoint, curr_point, rotor_a, rotor_b, world)
+
+    if CONFIG["DEBUG_LEVEL"] > 1:
+        print(f"------- RETURN {len(prev_midpoints)} + 1 + {len(next_midpoints)} MID POINTS")
+    return [*prev_midpoints, midpoint, *next_midpoints]
 
 
 def main(radius_a: float,
@@ -314,7 +350,7 @@ def main(radius_a: float,
     rotor_b = Rotor("B", rotor_sep, 0, radius_b, theta_b, omega_b, length_b)
     world = Rotor("World", world_x_coord, world_y_coord, 0, 0, world_omega, 0)
 
-    if CONFIG["DEBUG"]:
+    if CONFIG["DEBUG_LEVEL"] > 0:
         print(rotor_a)
         print(rotor_b)
 
@@ -322,7 +358,7 @@ def main(radius_a: float,
     start = datetime.now()
     result = PlotResult(rotor_a, rotor_b, world)
     points = datetime.now()
-    if CONFIG["PRINT_RESULTS"]:
+    if CONFIG["PRINT_POINTS"]:
         for x, y in result.get_tuples():
             print(f"{x}\t{y}")
     print(f"ABORTED EARLY AT {len(result.x)} POINTS" if result.aborted
@@ -360,16 +396,22 @@ def main(radius_a: float,
     print(f"PLOT RENDERED IN {(plotted - points).total_seconds()} SECONDS "
           f"(TOTAL: {(plotted - start).total_seconds()} SECONDS)")
 
+    if CONFIG["DEBUG_LEVEL"] > 0:
+        print(f"X RANGE: {result.x_min}  |  {result.x_max}")
+        print(f"Y RANGE: {result.y_min}  |  {result.y_max}")
+
 
 CONFIG = {
-    "DEBUG": False,
-    "VERBOSE": False,
-    "PRINT_RESULTS": False,
+    "DEBUG_LEVEL": 2,   # 0 - Nothing
+                        # 1 - Allows things that print only once
+                        # 2 - Allows things that only conditionally print every loop
+                        # 3 - Everything
+    "PRINT_POINTS": False,
 
     "time_step": 0.1 / 4,
     "abort_on_cycle": True,
-    "smoothing": False,  # Interpolates points if the pen moved a lot between them.
-                        # Slows renders, but produces better results on large time steps
+    "smoothing": True,  # Interpolates points if the pen moved a lot between them.
+                         # Slows renders, but produces better results on large time steps
     "max_point_sep": 1,    # The distance above which adjacent points will be smoothed
     "num_points": 6000000,
     "padding": 0.1,
