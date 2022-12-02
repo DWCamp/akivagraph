@@ -1,10 +1,9 @@
 # akivagraph
 Spiral Pattern Generator in Python
 
-![Red Klein Donut on Black](https://imgur.com/E1uBy1Z)
-
 ## Want to make cool images like these?
 
+- [Red Klein Donut on Black](https://imgur.com/E1uBy1Z)
 - [Black X on White](https://cdn.discordapp.com/attachments/304436942462910464/1047641913999761449/image.png)
 - [Orange Cardioid on Black](https://imgur.com/a/mRO5cpy)
 
