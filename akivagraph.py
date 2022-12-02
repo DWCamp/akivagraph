@@ -3,9 +3,11 @@ Defines the classes needed for the spirograph
 """
 import math
 import matplotlib.pyplot as plt
-from datetime import datetime
+import os
+import time
 
 from boring_math import dist, compute_period
+from config import CONFIG
 
 
 class Rotor:
@@ -56,22 +58,22 @@ class Rotor:
         """
         self.theta = (self.theta + self.omega * time_step) % 360
 
-    def theta_at(self, time):
+    def theta_at(self, timestamp):
         """
         Computes the theta of this rotor at a specified time
-        :param time: The time in question
+        :param timestamp: The time in question
         :return: The theta of the rotor at the specified time
         """
-        return (self.init_theta + (self.omega * time)) % 360
+        return (self.init_theta + (self.omega * timestamp)) % 360
 
-    def anchor_loc(self, time=None):
+    def anchor_loc(self, timestamp=None):
         """
         Returns the coordinates of the point where the linkage is attached on the perimeter of the disk
-        :param time: If provided, the anchor coordinates will be computed for where the rotor
+        :param timestamp: If provided, the anchor coordinates will be computed for where the rotor
         would be at that moment (Default: None)
         :return: A tuple of two floats representing the (x,y) coordinates
         """
-        theta_rads = math.radians(self.theta if time is None else self.theta_at(time))
+        theta_rads = math.radians(self.theta if timestamp is None else self.theta_at(timestamp))
         return (math.cos(theta_rads) * self.radius + self.x), (math.sin(theta_rads) * self.radius + self.y)
 
 
@@ -95,13 +97,10 @@ class PlotResult:
 
         # Compute graph period and calculate time_step / point count
         period = compute_period(rotor_a.omega, rotor_b.omega, world.omega)
-        if time_step * period > max_steps:
-            self.step = round(period / max_steps)
-            print("-------------------------------------------------------------------------\n"
-                  " ALERT: Total points needed to calculate the graph at provided time_step \n"
-                  f"        ({time_step * period}) exceeds step limit of {max_steps}.\n"
-                  f"        Time step has been increased to {round(self.step, 5)}."
-                  "\n-------------------------------------------------------------------------")
+        if period / time_step > max_steps:
+            self.step = period / max_steps
+            report(f"ALERT: Total points needed to calculate the graph at provided time_step ({period / time_step}) "
+                   f"exceeds step limit of {max_steps}. Time step has been increased to {round(self.step, 5)}.")
 
         if CONFIG["DEBUG_LEVEL"] > 0:
             print(f"Period: {period}")
@@ -239,20 +238,12 @@ def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
     mapped_anchor_b = (delta, 0)
 
     # Make sure the anchors aren't too close or too far apart for the linkage lengths
-    if anchor_sep < arm_length_a - arm_length_b:
-        print("-------------------------------------------------------------------------\n"
-              "ERROR: CONSTRAINT VIOLATION\n"
-              "Anchors are closer together than the difference between their arm lengths\n"
-              "Try increasing the rotor spread or reducing their radii"
-              "\n-------------------------------------------------------------------------")
-        exit(-1)
+    if anchor_sep < abs(arm_length_a - arm_length_b):
+        report("ERROR: CONSTRAINT VIOLATION - Anchors are closer together than the difference between their arm "
+               "lengths. Try increasing the rotor spread or reducing their radii", abort=True)
     if anchor_sep > arm_length_a + arm_length_b:
-        print("-------------------------------------------------------------------------\n"
-              "ERROR: CONSTRAINT VIOLATION\n"
-              "Anchors are further apart than the sum of their arm lengths\n"
-              "Try reducing rotor spread or increasing arm length"
-              "\n-------------------------------------------------------------------------")
-        exit(-1)
+        report("ERROR: CONSTRAINT VIOLATION - Anchors are further apart than the sum of their arm lengths. Try "
+               "reducing rotor spread or increasing arm length", abort=True)
 
     if CONFIG["DEBUG_LEVEL"] > 2:
         print(f"R_offset: {rot_offset}")
@@ -305,14 +296,14 @@ def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
     return Cx_world, Cy_world
 
 
-def interpolate(max_dist: float, time: float, time_step: float,
+def interpolate(max_dist: float, timestamp: float, time_step: float,
                 prev_point: (float, float), curr_point: (float, float),
                 rotor_a: Rotor, rotor_b: Rotor, world: Rotor) -> [(float, float)]:
     """
     Recursively generates more and more precise midpoints between two points until
     each one is separated from the next by less than the maximum allowable distance
     :param max_dist: The maximum allowed separation between two points
-    :param time: The time at the current point
+    :param timestamp: The time at the current point
     :param time_step: The current time step (when called from another function, this is CONFIG["time_step"])
     :param prev_point: The coordinates of the previous point
     :param curr_point: The coordinates of the current point
@@ -330,7 +321,7 @@ def interpolate(max_dist: float, time: float, time_step: float,
         print(f"INTERPOLATE - {time} | {time_step} | {prev_point} | {curr_point} | {spread}")
 
     # Compute mid time
-    mid_time = time - (time_step / 2)
+    mid_time = timestamp - (time_step / 2)
     mid_anchor_a = rotor_a.anchor_loc(mid_time)
     mid_anchor_b = rotor_b.anchor_loc(mid_time)
     world_loc = (world.x, world.y)
@@ -340,42 +331,56 @@ def interpolate(max_dist: float, time: float, time_step: float,
                                 world_loc, world.theta_at(mid_time))
     # Recursively compute the other midpoints
     prev_midpoints = interpolate(max_dist, mid_time, time_step / 2, prev_point, midpoint, rotor_a, rotor_b, world)
-    next_midpoints = interpolate(max_dist, time, time_step / 2, midpoint, curr_point, rotor_a, rotor_b, world)
+    next_midpoints = interpolate(max_dist, timestamp, time_step / 2, midpoint, curr_point, rotor_a, rotor_b, world)
 
     if CONFIG["DEBUG_LEVEL"] > 1:
         print(f"------- RETURN {len(prev_midpoints)} + 1 + {len(next_midpoints)} MID POINTS")
     return [*prev_midpoints, midpoint, *next_midpoints]
 
 
-def main(radius_a: float,
-         theta_a: float,
-         omega_a: float,
-         length_a: float,
-         radius_b: float,
-         theta_b: float,
-         omega_b: float,
-         length_b: float,
-         rotor_sep: float,
-         world_x_coord: float,
-         world_y_coord: float,
-         world_omega: float):
-    global CONFIG
+def report(msg: str, lpad: str = " ", abort: bool = False) -> None:
+    """
+    Prints a formatted warning to the console
+    :param msg: The alert to print
+    :param lpad: A string to pad each line with on the left (Default: ' ')
+    :param abort: Exit the program after printing the message
+    """
+    # Split long messages into 80-char chunks, split along spaces
+    lines = []
+    words = msg.strip().split(" ")
+    curr_line = lpad + words[0]
+    for word in words[1:]:
+        if len(f"{curr_line} {word}") > 80:
+            lines.append(curr_line)
+            curr_line = lpad + word
+        else:
+            curr_line = f"{curr_line} {word}"
+    if len(curr_line) > 0:
+        lines.append(curr_line)
+
+    # Print message
+    print("\n================================================================================")
+    for line in lines:
+        print(line)
+    print("================================================================================\n")
+    # Abort if asked
+    if abort:
+        exit(-1)
+
+
+def main(radius_a: float, theta_a: float, omega_a: float, length_a: float,
+         radius_b: float, theta_b: float, omega_b: float, length_b: float,
+         rotor_sep: float, world_x_coord: float, world_y_coord: float, world_omega: float):
+
     # Parameter validation
     if rotor_sep < 0:
-        print("-----------------------------------------------------\n"
-              "ERROR: Rotor separation must be a positive number"
-              "\n-----------------------------------------------------")
-        exit(-1)
+        report("ERROR: Rotor separation must be a positive number", abort=True)
     if rotor_sep + radius_a + radius_a > length_a + length_b:
-        print("-----------------------------------------------------\n"
-              "WARNING: Total linkage length is less than the maximum distance between anchor points. "
-              "Under many parameters, this will cause a crash"
-              "\n-----------------------------------------------------")
+        report("WARNING: Total linkage length is less than the maximum distance between anchor points. Under many "
+               "parameters, this will cause a crash")
     if rotor_sep - (radius_a + radius_b) < abs(length_a - length_b):
-        print("-----------------------------------------------------\n"
-              "WARNING: The difference in linkage length is greater than the minimum distance between anchor points. "
-              "Under many parameters, this will cause a crash"
-              "\n-----------------------------------------------------")
+        report("WARNING: The difference in linkage length is greater than the minimum distance between anchor points. "
+               "Under many parameters, this will cause a crash")
 
     # Create rotors
     rotor_a = Rotor("A", 0, 0, radius_a, theta_a, omega_a, length_a)
@@ -388,14 +393,14 @@ def main(radius_a: float,
         print(world)
 
     # Generate points
-    start = datetime.now()
+    start_t = round(time.perf_counter(), 5)
     smoothing = CONFIG["max_point_sep"] if CONFIG["smoothing"] else None
     result = PlotResult(rotor_a, rotor_b, world, CONFIG["step_length"], CONFIG["max_steps"], smoothing)
-    points = datetime.now()
+    points_t = round(time.perf_counter(), 5)
     if CONFIG["print_points"]:
         for x, y in result.get_tuples():
             print(f"{x}\t{y}")
-    print(f"{len(result)} POINTS GENERATED IN {(points - start).total_seconds()} SECONDS")
+    print(f"{len(result)} POINTS GENERATED IN {points_t - start_t} SECONDS")
 
     # Compute optimal window bounds
     max_axis_width = max(result.y_max - result.y_min, result.x_max - result.x_min)
@@ -407,7 +412,8 @@ def main(radius_a: float,
                (y_center + max_axis_width / 2) + max_axis_width * CONFIG["padding"])
 
     # Graph points
-    plt.figure(dpi=1000, figsize=(10, 10))  # Set plot dimensions
+    dpi = CONFIG["resolution"] / 10
+    plt.figure(dpi=dpi, figsize=(10, 10))  # Set plot dimensions
     ax = plt.subplot(111, aspect='equal')   # Create plot
     plt.subplots_adjust(left=0, bottom=0, right=1, top=1, wspace=0, hspace=0)   # Center plot
     ax.plot(result.x, result.y, linewidth=CONFIG["line_width"], color=CONFIG["color"])  # Plot data
@@ -417,103 +423,66 @@ def main(radius_a: float,
         # The `max_axis_width * 0.01` provides a consistent offset from the image edge
         plt.text(x_range[0] + max_axis_width * CONFIG["param_padding"],
                  y_range[0] + max_axis_width * CONFIG["param_padding"],
-                 f"Rotor A: (r: {rotor_a.radius}, θ: {rotor_a.init_theta}°, ω: {rotor_a.omega}°/s, "
+                 f"Rotor A: (r: {rotor_a.radius}, θ: {rotor_a.init_theta}°, ω: {round(rotor_a.omega, 4)}°/s, "
                  f"len: {rotor_a.arm_length})  |  Rotor B: (r: {rotor_b.radius}, θ: {rotor_b.init_theta}°, "
-                 f"ω: {rotor_b.omega}°/s, len: {rotor_b.arm_length})  |  "
+                 f"ω: {round(rotor_b.omega, 4)}°/s, len: {rotor_b.arm_length})  |  "
                  f"Rotor Sep: {rotor_b.x}  |  World: (x: {world.x}, y: {world.y}, ω: {world.omega}°/s)  |  "
                  f"tΔ: {round(result.step, 3)}  |  "
-                 f"smoothing: {CONFIG['max_point_sep'] if CONFIG['smoothing'] else 'Off'}",
-                 fontsize="small")
-    plt.savefig(CONFIG["output_file"])  # Save to output file
+                 f"smoothing: {CONFIG['max_point_sep'] if CONFIG['smoothing'] else 'Off'}  |  "
+                 f"Points: {len(result)}",
+                 fontsize="x-small",
+                 color=CONFIG["param_color"])
+
+    # Save to output file
+    output_file = f"output" + os.path.sep + CONFIG["output_file"]
+    plt.savefig(output_file, facecolor=CONFIG["bg_color"])
 
     # Print plot info to console
-    plotted = datetime.now()
-    print(f"PLOT RENDERED IN {(plotted - points).total_seconds()} SECONDS "
-          f"(TOTAL: {(plotted - start).total_seconds()} SECONDS)")
+    plot_t = round(time.perf_counter(), 5)
+    print(f"PLOT RENDERED IN {plot_t - points_t} SECONDS")
+    print(f"(TOTAL: {plot_t - start_t} SECONDS)")
+    print(f"Output file: {output_file}")
 
     if CONFIG["DEBUG_LEVEL"] > 0:
+        print("\n----------------------------------")
         print(f"X RANGE: {result.x_min}  |  {result.x_max}")
         print(f"Y RANGE: {result.y_min}  |  {result.y_max}")
 
 
-CONFIG = {
-    # Sets the amount of debug messages that are printed to console
-    # 0 - Nothing
-    # 1 - Allows things that print only once
-    # 2 - Allows things that only conditionally print every loop
-    # 3 - Everything
-    "DEBUG_LEVEL": 1,
-    # Print all of the points to console. Only do this for small graphs
-    "print_points": False,
-    # The threshold for floating point equality comparisons
-    # DO NOT CHANGE
-    "fl_precision": 0.00000001,
-
-    # The amount of time between point calculations
-    # A smaller time step means longer renders but smoother lines
-    # NOTE: If the number of steps exceeds the maximum, the length will be increased to compensate
-    "step_length": 0.1,
-    # Renders additional points between two steps if the pen moved a lot
-    # On some graphs, this can dramatically increase render times
-    # However, on graphs with only a few jagged curves, this can increase smoothness without lowering the time step
-    "smoothing": True,
-    # If smoothing is turned on, this is the distance threshold above which points will be interpolated
-    # Recommended values are between 1 and 0.1
-    "max_point_sep": 1,
-    # Caps the total number of time steps. Low numbers will guarantee quick results,
-    # but may produce poor results with complicated patterns
-    # NOTE: Any additional points generated by smoothing will not count towards this limit
-    "max_steps": 500000,
-
-    # Whitespace to put around the graph
-    "padding": 0.1,
-    # The thickness of the line
-    "line_width": 0.2,
-    # The file to output to. Should be a pdf or png file
-    "output_file": "graph.pdf",
-    # The color of the line
-    "color": "black",
-    # Whether to print the rotor parameters at the bottom of the graph
-    "show_params": True,
-    # Padding for the parameter text
-    "param_padding": 0.01,
-}
-
-
 if __name__ == '__main__':
+    # Config validation
     if CONFIG["step_length"] <= 0:
-        print("-----------------------------------------------------\n"
-              "ERROR: Time increment must be a positive number"
-              "\n-----------------------------------------------------")
-        exit(-1)
+        report("ERROR: Time increment must be a positive number", abort=True)
 
     if CONFIG["smoothing"] and CONFIG["max_point_sep"] <= 0:
-        print("-----------------------------------------------------\n"
-              "ERROR: max_point_sep must be greater than 0"
-              "\n-----------------------------------------------------")
-        exit(-1)
+        report("ERROR: max_point_sep must be greater than 0", abort=True)
 
     if CONFIG["smoothing"] and CONFIG["max_point_sep"] < 0.05:
-        print("-----------------------------------------------------\n"
-              "WARNING: max_point_sep is very low. This may cause long render times or even crashes"
-              "\n-----------------------------------------------------")
+        report("WARNING: max_point_sep is very low. This may cause long render times or even crashes")
+
+    if not CONFIG["output_file"].endswith("pdf"):   # Resolution doesn't affect PDFs
+        if CONFIG["resolution"] < 1:
+            report("ERROR: resolution must be greater than 0", abort=True)
+
+        if CONFIG["resolution"] < 100:
+            report("WARNING: plot resolution is very low (<100). This will produce very low quality images")
 
     # Rotor params
     p = {
-        "radius_a": 10,
-        "theta_a": 90,
-        "omega_a": -10.3,
-        "length_a": 20,
+        "radius_a": 3,
+        "theta_a": 0,
+        "omega_a": 400,
+        "length_a": 18,
 
-        "radius_b": 10,
+        "radius_b": 3,
         "theta_b": 0,
-        "omega_b": 10,
-        "length_b": 20,
+        "omega_b": 403,
+        "length_b": 46,
 
-        "rotor_sep": 10,
+        "rotor_sep": 50,
 
-        "world_x_coord": 5,
-        "world_y_coord": 30,
-        "world_omega": 0,
+        "world_x_coord": 10,
+        "world_y_coord": -3,
+        "world_omega": 1,
     }
     main(**p)
