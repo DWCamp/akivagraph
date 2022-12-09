@@ -3,8 +3,10 @@ Defines the classes needed for the spirograph
 """
 import math
 import matplotlib.pyplot as plt
+# from multiprocessing import Process
 import os
 import time
+from typing import Optional, List, Tuple
 
 from boring_math import dist, compute_period
 from config import CONFIG
@@ -29,57 +31,34 @@ class Rotor:
         self.y = y
         self.radius = radius
         self.theta = theta
-        self.init_theta = theta
         self.omega = omega
         self.arm_length = arm_length
 
     def __str__(self) -> str:
         return f"Rotor `{self.name}` | Loc: ({self.x}, {self.y}) | r: {self.radius} " \
-               f"| arm length: {self.arm_length} | theta: {self.theta}° | theta start: {self.init_theta}° " \
-               f"| omega: {self.omega}°/sec"
-
-    def __eq__(self, other):
-        # The use of the inequality on theta is to avoid floating point errors throwing off the comparison
-        return other.name == self.name and other.x == self.x and other.y == self.y and other.radius == self.radius \
-                and other.arm_length == self.arm_length and other.omega == self.omega \
-                and (abs(other.theta - self.theta) < CONFIG["fl_precision"]
-                     or abs(other.theta - self.theta) > 360 - CONFIG["fl_precision"])
-
-    def copy(self):
-        """
-        Returns a duplicate copy of this rotor
-        """
-        return Rotor(self.name, self.x, self.y, self.radius, self.theta, self.omega, self.arm_length)
-
-    def increment(self, time_step):
-        """
-        Spins the rotor by a defined time increment
-        :param time_step: The amount of time in seconds to spin the rotor. Lower values give more accurate simulations
-        """
-        self.theta = (self.theta + self.omega * time_step) % 360
+               f"| arm length: {self.arm_length} | theta: {self.theta}° | omega: {self.omega}°/sec"
 
     def theta_at(self, timestamp):
         """
-        Computes the theta of this rotor at a specified time
-        :param timestamp: The time in question
-        :return: The theta of the rotor at the specified time
+        Computes the theta of the rotor at a given timestamp
+        :param timestamp: The timestamp to compute the theta at
+        :return: The theta at the given timestamp (in degrees)
         """
-        return (self.init_theta + (self.omega * timestamp)) % 360
+        return (self.theta + (self.omega * timestamp)) % 360
 
-    def anchor_loc(self, timestamp=None):
+    def anchor_loc(self, timestamp):
         """
         Returns the coordinates of the point where the linkage is attached on the perimeter of the disk
-        :param timestamp: If provided, the anchor coordinates will be computed for where the rotor
-        would be at that moment (Default: None)
+        :param timestamp: The timestamp to compute the anchor location at
         :return: A tuple of two floats representing the (x,y) coordinates
         """
-        theta_rads = math.radians(self.theta if timestamp is None else self.theta_at(timestamp))
+        theta_rads = math.radians(self.theta_at(timestamp))
         return (math.cos(theta_rads) * self.radius + self.x), (math.sin(theta_rads) * self.radius + self.y)
 
 
-class PlotResult:
+class PointCompute:
     def __init__(self, rotor_a: Rotor, rotor_b: Rotor, world: Rotor,
-                 time_step: float, max_steps: int, smoothing: float):
+                 time_step: float, max_steps: int, smoothing: Optional[float], segments: int):
         """
         Generates a list of points for the scatter plot
         :param rotor_a: The main rotor
@@ -90,10 +69,13 @@ class PlotResult:
         required to draw the plot exceeds this, time_step will be increased as needed
         :param smoothing: The distance above which adjacent points should be interpolated.
         To disable smoothing, pass `None`
-        :return: A list of (x,y) tuples representing all of the points the pen visited
+        :param segments: Temporary variable while testing multiprocessing implementation
+        :return: A list of (x,y) tuples representing all points the pen visited
         """
 
         self.step = time_step
+        self.x = list()
+        self.y = list()
 
         # Compute graph period and calculate time_step / point count
         period = compute_period(rotor_a.omega, rotor_b.omega, world.omega)
@@ -105,68 +87,86 @@ class PlotResult:
         if CONFIG["DEBUG_LEVEL"] > 0:
             print(f"Period: {period}")
 
-        # Store initial point before going into loop
-        x, y = compute_draw_loc(rotor_a.anchor_loc(), rotor_a.arm_length,
-                                rotor_b.anchor_loc(), rotor_b.arm_length,
-                                (world.x, world.y), world.theta)
-        self.x = [x]
-        self.y = [y]
-
-        self.x_max = x
-        self.x_min = x
-        self.y_max = y
-        self.y_min = y
-
-        prev_x, prev_y = x, y
-        curr_time = 0
-
-        # This flag protects against attempting to interpolate when the anchors overlap
-        # The flag will be set `True` if the anchors are overlapping and won't be reset
-        # until the point after the overlap is calculated
-        no_smoothing = False
+        # Init max / min values
+        self.x_max = -1 * math.inf
+        self.x_min = math.inf
+        self.y_max = -1 * math.inf
+        self.y_min = math.inf
 
         # Generate points
         print("Generating points...")
-        while curr_time < period:
-            # Step both rotors forwards
-            rotor_a.increment(self.step)
-            rotor_b.increment(self.step)
-            world.increment(self.step)
-            curr_time += self.step
+        segment_len = period / segments
+        for i in range(segments):
+            start = segment_len * i
+            end = start + segment_len
+            new_x, new_y = self.compute_segment(start, end, time_step, rotor_a, rotor_b, world, smoothing)
+            self.x += new_x
+            self.y += new_y
+
+    def __len__(self):
+        return len(self.x)
+
+    def compute_segment(self, start: float, end: float, time_step: float,
+                        rotor_a: Rotor, rotor_b: Rotor, world: Rotor,
+                        smoothing: Optional[float]) -> Tuple[List[float], List[float]]:
+        """
+        Renders a segment of the graph between two timestamps (inclusive) at a given resolution
+        :param start: The timestamp of the first point to graph
+        :param end: The timestamp of the last point to graph
+        :param time_step: The time resolution to graph at
+        :param rotor_a: The primary rotor
+        :param rotor_b: The secondary rotor
+        :param world: The world object
+        :param smoothing: The threshold for point interpolation. Pass `None` for no smoothing
+        :return: The list of x and y points
+        """
+
+        # Init loop tracking values
+        curr_time = start
+        no_smoothing = False
+
+        # Init point store values
+        x, y = compute_draw_loc(rotor_a, rotor_b, world, curr_time)
+        prev_x, prev_y = x, y
+        x_list = [x]
+        y_list = [y]
+
+        # Compute points
+        while curr_time < end:
+            # Increment time
+            curr_time += time_step
 
             # Compute next point
-            anchor_a = rotor_a.anchor_loc()
-            anchor_b = rotor_b.anchor_loc()
+            anchor_a = rotor_a.anchor_loc(curr_time)
+            anchor_b = rotor_b.anchor_loc(curr_time)
             overlapping = abs(anchor_a[0] - anchor_b[0]) < CONFIG["fl_precision"] \
                 and abs(anchor_a[1] - anchor_b[1]) < CONFIG["fl_precision"]
             no_smoothing = True if overlapping else no_smoothing
             # If anchor points are on top of each other, this can cause indeterminate results
             # In this case, just reuse the previous point
             if overlapping:
-                x = self.x[-1]
-                y = self.y[-1]
+                x = x_list[-1]
+                y = y_list[-1]
             else:
-                x, y = compute_draw_loc(rotor_a.anchor_loc(), rotor_a.arm_length,
-                                        rotor_b.anchor_loc(), rotor_b.arm_length,
-                                        (world.x, world.y), world.theta)
+                x, y = compute_draw_loc(rotor_a, rotor_b, world, curr_time)
 
             if smoothing is not None and no_smoothing <= 0:   # Do not interpolate when anchors overlap
                 # Interpolate
-                midpoints = interpolate(smoothing, curr_time, self.step,
+                midpoints = interpolate(smoothing, curr_time, time_step,
                                         (prev_x, prev_y), (x, y),
                                         rotor_a, rotor_b, world)
-                x_list = [point[0] for point in midpoints]
-                y_list = [point[1] for point in midpoints]
+                x_inter_points = [point[0] for point in midpoints]
+                y_inter_points = [point[1] for point in midpoints]
 
-                if len(x_list) > 0:
+                if len(x_inter_points) > 0:
                     # Add interpolated points to list
-                    self.x += x_list
-                    self.y += y_list
+                    x_list += x_inter_points
+                    y_list += y_inter_points
                     # Update max and min
-                    self.x_max = max(self.x_max, max(x_list))
-                    self.x_min = min(self.x_min, min(x_list))
-                    self.y_max = max(self.y_max, max(y_list))
-                    self.y_min = min(self.y_min, min(y_list))
+                    self.x_max = max(self.x_max, max(x_inter_points))
+                    self.x_min = min(self.x_min, min(x_inter_points))
+                    self.y_max = max(self.y_max, max(y_inter_points))
+                    self.y_min = min(self.y_min, min(y_inter_points))
 
             # Update prev points
             prev_x, prev_y = x, y
@@ -178,24 +178,15 @@ class PlotResult:
             self.y_min = min(self.y_min, y)
 
             # Add points to list
-            self.x.append(x)
-            self.y.append(y)
+            x_list.append(x)
+            y_list.append(y)
 
             # Update no_smoothing
             no_smoothing = overlapping
 
-            # Print debug info
-            if CONFIG["DEBUG_LEVEL"] > 2:
-                print("==========================")
-                print(f"Time: {curr_time}")
-                print(f"Rotor A: {rotor_a}")
-                print(f"Rotor B: {rotor_b}")
-                print(f"World: {world}")
+        return x_list, y_list
 
-    def __len__(self):
-        return len(self.x)
-
-    def get_tuples(self) -> [(float, float)]:
+    def get_tuples(self) -> List[Tuple[float, float]]:
         """
         Returns the x and y data points as a list of tuples
         """
@@ -205,26 +196,30 @@ class PlotResult:
         return tuple_list
 
 
-def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
-                     anchor_b: (float, float), arm_length_b: float,
-                     world_loc: (float, float), world_theta: float):
+def compute_draw_loc(rotor_a: Rotor, rotor_b: Rotor, world: Rotor, timestamp: float):
     """
     Computes the coordinate of the drawing point where the two rotor linkages connect
-    :param anchor_a: The (x,y) coordinates of rotor a's anchor point
-    :param arm_length_a: The length of rotor a's arm
-    :param anchor_b: The (x,y) coordinates of rotor b's anchor point
-    :param arm_length_b: The length of rotor b's arm
-    :param world_loc: The center point of the rotating world
-    :param world_theta: The current rotation of the world
+    :param rotor_a: The primary rotor
+    :param rotor_b: The secondary rotor
+    :param world: The world
+    :param timestamp: The current timestamp
     :return: The coordinates of the meeting point
     """
 
+    # Get relevant values
+    anchor_a = rotor_a.anchor_loc(timestamp)
+    anchor_b = rotor_b.anchor_loc(timestamp)
+
+    arm_length_a = rotor_a.arm_length
+    arm_length_b = rotor_b.arm_length
+
     if CONFIG["DEBUG_LEVEL"] > 2:
         print("==============================================")
+        print(f"Timestamp: {time}")
         print(f"Anchor A: {anchor_a}")
         print(f"Anchor B: {anchor_b}")
 
-    # The translation that all points must be offset by to put anchor a at (0,0)
+    # The translation that all points must be offset by to put anchor A at (0,0)
     trans_offset = (anchor_a[0] * -1, anchor_a[1] * -1)
 
     if CONFIG["DEBUG_LEVEL"] > 2:
@@ -281,12 +276,12 @@ def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
         print(f"Translated draw point: ({Cx_trans}, {Cy_trans})")
 
     # Do the hokey-pokey and turn that point around
-    world_rad = math.radians(world_theta)
-    Cx_world = (Cx_trans - world_loc[0]) * math.cos(world_rad) - (Cy_trans - world_loc[1]) * math.sin(world_rad)
-    Cy_world = (Cx_trans - world_loc[0]) * math.sin(world_rad) + (Cy_trans - world_loc[1]) * math.cos(world_rad)
+    world_rad = math.radians(world.theta_at(timestamp))
+    Cx_world = (Cx_trans - world.x) * math.cos(world_rad) - (Cy_trans - world.y) * math.sin(world_rad)
+    Cy_world = (Cx_trans - world.x) * math.sin(world_rad) + (Cy_trans - world.y) * math.cos(world_rad)
 
-    Cx_world += world_loc[0]
-    Cy_world += world_loc[1]
+    Cx_world += world.x
+    Cy_world += world.y
 
     if CONFIG["DEBUG_LEVEL"] > 2:
         print("==============================================")
@@ -297,8 +292,8 @@ def compute_draw_loc(anchor_a: (float, float), arm_length_a: float,
 
 
 def interpolate(max_dist: float, timestamp: float, time_step: float,
-                prev_point: (float, float), curr_point: (float, float),
-                rotor_a: Rotor, rotor_b: Rotor, world: Rotor) -> [(float, float)]:
+                prev_point: Tuple[float, float], curr_point: Tuple[float, float],
+                rotor_a: Rotor, rotor_b: Rotor, world: Rotor) -> List[Tuple[float, float]]:
     """
     Recursively generates more and more precise midpoints between two points until
     each one is separated from the next by less than the maximum allowable distance
@@ -320,15 +315,10 @@ def interpolate(max_dist: float, timestamp: float, time_step: float,
     if CONFIG["DEBUG_LEVEL"] > 1:
         print(f"INTERPOLATE - {time} | {time_step} | {prev_point} | {curr_point} | {spread}")
 
-    # Compute mid time
+    # Compute the midpoint
     mid_time = timestamp - (time_step / 2)
-    mid_anchor_a = rotor_a.anchor_loc(mid_time)
-    mid_anchor_b = rotor_b.anchor_loc(mid_time)
-    world_loc = (world.x, world.y)
-    # Compute the mid point
-    midpoint = compute_draw_loc(mid_anchor_a, rotor_a.arm_length,
-                                mid_anchor_b, rotor_b.arm_length,
-                                world_loc, world.theta_at(mid_time))
+    midpoint = compute_draw_loc(rotor_a, rotor_b, world, mid_time)
+
     # Recursively compute the other midpoints
     prev_midpoints = interpolate(max_dist, mid_time, time_step / 2, prev_point, midpoint, rotor_a, rotor_b, world)
     next_midpoints = interpolate(max_dist, timestamp, time_step / 2, midpoint, curr_point, rotor_a, rotor_b, world)
@@ -395,7 +385,7 @@ def main(radius_a: float, theta_a: float, omega_a: float, length_a: float,
     # Generate points
     start_t = round(time.perf_counter(), 5)
     smoothing = CONFIG["max_point_sep"] if CONFIG["smoothing"] else None
-    result = PlotResult(rotor_a, rotor_b, world, CONFIG["step_length"], CONFIG["max_steps"], smoothing)
+    result = PointCompute(rotor_a, rotor_b, world, CONFIG["step_length"], CONFIG["max_steps"], smoothing, 10)
     points_t = round(time.perf_counter(), 5)
     if CONFIG["print_points"]:
         for x, y in result.get_tuples():
@@ -423,8 +413,8 @@ def main(radius_a: float, theta_a: float, omega_a: float, length_a: float,
         # The `max_axis_width * 0.01` provides a consistent offset from the image edge
         plt.text(x_range[0] + max_axis_width * CONFIG["param_padding"],
                  y_range[0] + max_axis_width * CONFIG["param_padding"],
-                 f"Rotor A: (r: {rotor_a.radius}, θ: {rotor_a.init_theta}°, ω: {round(rotor_a.omega, 4)}°/s, "
-                 f"len: {rotor_a.arm_length})  |  Rotor B: (r: {rotor_b.radius}, θ: {rotor_b.init_theta}°, "
+                 f"Rotor A: (r: {rotor_a.radius}, θ: {rotor_a.theta}°, ω: {round(rotor_a.omega, 4)}°/s, "
+                 f"len: {rotor_a.arm_length})  |  Rotor B: (r: {rotor_b.radius}, θ: {rotor_b.theta}°, "
                  f"ω: {round(rotor_b.omega, 4)}°/s, len: {rotor_b.arm_length})  |  "
                  f"Rotor Sep: {rotor_b.x}  |  World: (x: {world.x}, y: {world.y}, ω: {world.omega}°/s)  |  "
                  f"tΔ: {round(result.step, 3)}  |  "
@@ -469,20 +459,20 @@ if __name__ == '__main__':
 
     # Rotor params
     p = {
-        "radius_a": 3,
-        "theta_a": 0,
-        "omega_a": 400,
-        "length_a": 18,
+        "radius_a": 10,
+        "theta_a": 90,
+        "omega_a": -10.1,
+        "length_a": 20,
 
-        "radius_b": 3,
+        "radius_b": 10,
         "theta_b": 0,
-        "omega_b": 403,
-        "length_b": 46,
+        "omega_b": 10,
+        "length_b": 20,
 
-        "rotor_sep": 50,
+        "rotor_sep": 10,
 
-        "world_x_coord": 10,
-        "world_y_coord": -3,
-        "world_omega": 1,
+        "world_x_coord": 5,
+        "world_y_coord": 30,
+        "world_omega": 0,
     }
     main(**p)
