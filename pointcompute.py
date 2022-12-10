@@ -6,6 +6,8 @@ Specifies the PointCompute class and its return type
 """
 
 import math
+from multiprocessing import Pool
+import os
 from typing import Optional, List, Tuple
 
 from rotor import Rotor
@@ -14,8 +16,9 @@ from config import CONFIG
 
 
 class PointCompute:
+
     def __init__(self, rotor_a: Rotor, rotor_b: Rotor, world: Rotor,
-                 time_step: float, max_steps: int, smoothing: Optional[float], segments: int):
+                 time_step: float, max_steps: int, smoothing: Optional[float]):
         """
         Generates a list of points for the scatter plot
         :param rotor_a: The main rotor
@@ -26,7 +29,6 @@ class PointCompute:
         required to draw the plot exceeds this, time_step will be increased as needed
         :param smoothing: The distance above which adjacent points should be interpolated.
         To disable smoothing, pass `None`
-        :param segments: Temporary variable while testing multiprocessing implementation
         :return: A list of (x,y) tuples representing all points the pen visited
         """
 
@@ -66,10 +68,11 @@ class PointCompute:
                    "which was too large to compute.", abort=True)
 
         # Calculate time_step & point count
-        if period / time_step > max_steps:
-            self.step = period / max_steps
-            report(f"ALERT: Total points needed to calculate the graph at provided time_step ({period / time_step}) "
-                   f"exceeds step limit of {max_steps}. Time step has been increased to {round(self.step, 5)}.")
+        req_points = period / time_step
+        if req_points > max_steps:
+            time_step = period / max_steps
+            report(f"ALERT: At provided time_step, the total points needed to calculate the graph ({req_points}) "
+                   f"exceeds step limit of {max_steps}. Time step has been increased to {round(time_step, 5)}.")
 
         # Init max / min values
         self.x_max = -1 * math.inf
@@ -77,21 +80,47 @@ class PointCompute:
         self.y_max = -1 * math.inf
         self.y_min = math.inf
 
+        # Compute task count
+        if CONFIG["disable_threading"]:
+            tasks = 1
+        elif smoothing is None:
+            tasks = 1 if max_steps <= 11000 else os.cpu_count()
+        else:
+            tasks = 1 if max_steps <= 7500 else os.cpu_count() * 10
+
+        if CONFIG["DEBUG_LEVEL"] > 0:
+            print(f"Tasks: {tasks}")
+
         # Generate points
-        print("Generating points...")
-        segment_len = period / segments
-        for i in range(segments):
-            start = segment_len * i
-            end = start + segment_len
-            new_x, new_y = compute_segment(start, end, time_step, rotor_a, rotor_b, world, smoothing)
-            self.x += new_x
-            self.y += new_y
+
+        if tasks <= 1:  # For only 1 task, just do it single threaded
+            self.x, self.y = compute_segment(0, period, time_step, rotor_a, rotor_b, world, smoothing)
 
             # Update max/min
-            self.x_max = max(self.x_max, max(new_x))
-            self.x_min = min(self.x_min, min(new_x))
-            self.y_max = max(self.y_max, max(new_y))
-            self.y_min = min(self.y_min, min(new_y))
+            self.x_max = max(self.x)
+            self.x_min = min(self.x)
+            self.y_max = max(self.y)
+            self.y_min = min(self.y)
+        else:
+            segment_len = period / tasks
+            seg_params = list()
+            for i in range(tasks):
+                start = segment_len * i
+                end = start + segment_len
+                seg_params.append((start, end, time_step, rotor_a, rotor_b, world, smoothing))
+
+            with Pool() as pool:
+                result = pool.starmap(compute_segment, seg_params)
+
+            for new_x, new_y in result:
+                self.x += new_x
+                self.y += new_y
+
+                # Update max/min
+                self.x_max = max(self.x_max, max(new_x))
+                self.x_min = min(self.x_min, min(new_x))
+                self.y_max = max(self.y_max, max(new_y))
+                self.y_min = min(self.y_min, min(new_y))
 
     def __len__(self):
         return len(self.x)

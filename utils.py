@@ -43,6 +43,11 @@ def report(msg: str, lpad: str = " ", abort: bool = False) -> None:
     :param lpad: A string to pad each line with on the left (Default: ' ')
     :param abort: Exit the program after printing the message
     """
+    if CONFIG["suppress_report"]:
+        if abort:
+            exit(-1)
+        return
+
     # Split long messages into 80-char chunks, split along spaces
     lines = []
     words = msg.strip().split(" ")

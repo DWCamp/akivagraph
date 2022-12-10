@@ -38,7 +38,7 @@ def main(radius_a: float, theta_a: float, omega_a: float, length_a: float,
     # Generate points
     start_t = time.perf_counter()
     smoothing = CONFIG["max_point_sep"] if CONFIG["smoothing"] else None
-    result = PointCompute(rotor_a, rotor_b, world, CONFIG["step_length"], CONFIG["max_steps"], smoothing, 10)
+    result = PointCompute(rotor_a, rotor_b, world, CONFIG["step_length"], CONFIG["max_steps"], smoothing)
     points_t = time.perf_counter()
     if CONFIG["print_points"]:
         for x, y in result:
@@ -126,6 +126,6 @@ if __name__ == '__main__':
 
         "world_x_coord": 5,
         "world_y_coord": 30,
-        "world_omega": 0,
+        "world_omega": 0.27,
     }
     main(**p)
