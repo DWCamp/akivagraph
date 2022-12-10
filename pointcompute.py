@@ -73,6 +73,7 @@ class PointCompute:
             time_step = period / max_steps
             report(f"ALERT: At provided time_step, the total points needed to calculate the graph ({req_points}) "
                    f"exceeds step limit of {max_steps}. Time step has been increased to {round(time_step, 5)}.")
+            req_points = period / time_step
 
         # Init max / min values
         self.x_max = -1 * math.inf
@@ -84,9 +85,9 @@ class PointCompute:
         if CONFIG["disable_threading"]:
             tasks = 1
         elif smoothing is None:
-            tasks = 1 if max_steps <= 11000 else os.cpu_count()
+            tasks = 1 if req_points <= 11000 else os.cpu_count()
         else:
-            tasks = 1 if max_steps <= 7500 else os.cpu_count() * 10
+            tasks = 1 if req_points <= 7500 else os.cpu_count() * 10
 
         if CONFIG["DEBUG_LEVEL"] > 0:
             print(f"Tasks: {tasks}")
